@@ -53,10 +53,13 @@ footer{color:var(--muted);font-size:.66rem;line-height:1.65;margin-top:22px}
 .toast{position:fixed;right:18px;bottom:18px;z-index:50;min-width:220px;max-width:min(420px,calc(100vw - 36px));padding:10px 13px;border-radius:8px;border:1px solid var(--border);background:var(--panel);box-shadow:0 10px 28px rgba(15,23,42,.16);font-size:.75rem;font-weight:700;opacity:0;transform:translateY(6px);transition:opacity .16s ease,transform .16s ease;pointer-events:none}.toast.success{border-color:color-mix(in srgb,var(--good) 35%,var(--border))}.toast.error{border-color:color-mix(in srgb,var(--bad) 35%,var(--border))}
 @media(max-width:900px){.topbar{flex-direction:column}.actions{justify-content:flex-start}.grid{grid-template-columns:repeat(2,1fr)}.span2,.span3{grid-column:span 2}.wsliders,.settingsgrid{grid-template-columns:repeat(2,1fr)}.statbar{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:560px){.wrap{padding:16px 12px 45px}.grid,.wsliders,.settingsgrid,.statbar{grid-template-columns:1fr}.span2,.span3{grid-column:1}.card{padding:14px}.actions{width:100%}.actions .btn{flex:1}.rankcontrols .field,.rankcontrols .field.small{min-width:0;flex:1 1 150px}.toast{right:12px;bottom:12px}}
+#startupError{margin-bottom:12px}
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div id="startupError" class="notice" hidden role="alert"></div>
+
   <header class="topbar">
     <div class="brand">
       <div class="brandmark">PVL</div>
@@ -65,8 +68,8 @@ footer{color:var(--muted);font-size:.66rem;line-height:1.65;margin-top:22px}
     <div class="actions">
       <button class="btn btn-ghost" onclick="toggleTheme()" id="themeBtn">◐ Theme</button>
       <button class="btn btn-ghost" onclick="toggleCurrency()" id="curBtn">€ EUR</button>
-      <button class="btn btn-ghost" onclick="exportData()">Export</button>
-      <button class="btn btn-primary" onclick="document.getElementById('importFile').click()">Import</button>
+      <button type="button" class="btn btn-ghost" onclick="exportData()">Export</button>
+      <button type="button" class="btn btn-primary" onclick="document.getElementById('importFile').click()">Import</button>
       <input id="importFile" type="file" accept=".json" hidden onchange="importData(event)">
     </div>
   </header>
@@ -85,7 +88,7 @@ footer{color:var(--muted);font-size:.66rem;line-height:1.65;margin-top:22px}
     </div>
   </section>
 
-  <section class="card">
+  <form class="card" id="listingForm">
     <div class="cardhead">
       <div><h2 id="formTitle">Add a listing</h2><p>Enter the real benchmark scores — the calculator never invents component performance.</p></div>
       <button class="btn btn-ghost" onclick="openParts()">Manage CPU / GPU database</button>
@@ -106,11 +109,11 @@ footer{color:var(--muted);font-size:.66rem;line-height:1.65;margin-top:22px}
       <div class="field"><label>Looks</label><select id="f_aesthetic"><option value="neutral">Neutral</option><option value="pretty">Pretty</option><option value="ugly">Not pretty</option></select></div>
     </div>
     <div class="formfoot">
-      <button class="btn btn-primary" id="addBtn" onclick="addListing()">+ Add to comparison</button>
+      <button class="btn btn-primary" id="addBtn" type="submit">+ Add to comparison</button>
       <button class="btn btn-ghost" id="cancelEditBtn" onclick="cancelEdit()" style="display:none">Cancel edit</button>
       <span class="hint">Required: CPU Mark, G3D Mark and price. Everything else can be zero.</span>
     </div>
-  </section>
+  </form>
 
   <section class="card">
     <div class="cardhead">
@@ -397,8 +400,30 @@ function importData(ev){
   reader.onload=()=>{try{const d=JSON.parse(reader.result);if(!Array.isArray(d.items)||!Array.isArray(d.customCPUs)||!Array.isArray(d.customGPUs))throw new Error("This is not a PC Value Lab backup.");items=d.items.map(it=>({...it,favorite:Boolean(it.favorite)}));customCPUs=d.customCPUs;customGPUs=d.customGPUs;if(d.settings){if(Number.isFinite(d.settings.ddr4Discount))f("ddr4Discount").value=d.settings.ddr4Discount;if(Number.isFinite(d.settings.aestheticWeight))f("aestheticWeight").value=d.settings.aestheticWeight;if(typeof d.settings.ddr5Only==="boolean")f("ddr5Only").checked=d.settings.ddr5Only;if(Number.isFinite(d.settings.refCpuScore))f("ref_cpuScore").value=d.settings.refCpuScore;if(Number.isFinite(d.settings.refGpuScore))f("ref_gpuScore").value=d.settings.refGpuScore;}save();populateSelects();renderTable();showToast("Import successful.","success")}catch(e){showError("Import failed","The selected file could not be imported safely.",e.message)}ev.target.value=""};reader.readAsText(file)
 }
 window.addEventListener("keydown",e=>{if(e.key==="Escape"){closeError();closeParts()}});
+// Explicitly expose the public UI handlers. GitHub Pages serves this as a normal classic script,
+// but explicit exports make the page resilient to future bundling/CSP changes.
+Object.assign(window,{toggleTheme,toggleCurrency,exportData,importData,resetReferenceToDefault,fillRefCpu,fillRefGpu,openParts,closeParts,addReferencePart,closeError,clearAll,renderTable});
 
-load();populateSelects();f("curBtn").textContent=currency==="EUR"?"€ EUR":"$ USD";updateSettingReadouts();renderTable();
+
+function init(){
+  try{
+    load();
+    populateSelects();
+    f("curBtn").textContent=currency==="EUR"?"€ EUR":"$ USD";
+    updateSettingReadouts();
+    renderTable();
+  }catch(error){
+    console.error("PC Value Lab initialization failed:",error);
+    const fallback=document.getElementById("startupError");
+    if(fallback){fallback.hidden=false;fallback.textContent="The app could not initialize. Please refresh the page or check the browser console for details.";}
+  }
+}
+
+document.addEventListener("DOMContentLoaded",()=>{
+  const form=document.getElementById("listingForm");
+  if(form) form.addEventListener("submit",event=>{event.preventDefault();addListing();});
+  init();
+});
 </script>
 </body>
 </html>
