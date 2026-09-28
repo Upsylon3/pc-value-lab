@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  pages: write
 
 concurrency:
   group: passmark-sync
@@ -44,3 +45,9 @@ jobs:
           git add builtin-parts.js
           git commit -m "Weekly PassMark sync"
           git push
+
+      - name: Ask GitHub Pages to publish the new version
+        continue-on-error: true # never fails the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds"
