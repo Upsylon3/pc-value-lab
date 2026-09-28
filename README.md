@@ -1,36 +1,65 @@
 # PC Value Lab
 
-A small browser-based tool for comparing used PCs by hardware, performance, price, and personal preference.
+Find the best-value used PC. Add listings, and the app ranks them by real performance per euro.
 
-## What it does
+**Live:** https://upsylon3.github.io/pc-value-lab/
 
-- Compares CPU and GPU performance against a reference PC.
-- Scores RAM and storage separately.
-- Lets you change the weighting used for the overall score.
-- Keeps a separate **Value / price** measure for bargain hunting.
-- Lets you mark listings as favourites and filter to your shortlist.
-- Stores listings and custom CPU/GPU references in the browser with `localStorage`.
-- Exports and imports the comparison data as JSON.
-- Works as a single static page: no server and no build step required.
+## How to use it
+
+1. **Add a PC** – search its CPU and GPU, enter the price. That's all that's required.
+2. **Unknown RAM or SSD?** Tick "I don't know" and the app assumes 16 GB DDR4 / 1000 GB SSD. Assumed values are marked with `~` in the results.
+3. **Compare** – the best deal rises to the top. Sort by value, power, price and more, or star your favourites.
+
+## What the scores mean
+
+- **Performance** – CPU, GPU, RAM and storage compared with a yardstick PC (100%), then weighted. Pick a profile in Settings (Balanced / Gaming / Work) or fine-tune under "Advanced".
+- **Value** – performance divided by price, shown from 0 to 100 (100 = best deal in your list).
+- DDR4 is slightly penalised against DDR5 (adjustable). Looks can optionally influence the score (off by default).
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `index.html` | the whole app |
+| `builtin-parts.js` | built-in CPU/GPU benchmark list |
+| `config.js` | shared-database connection (Supabase URL + key) |
+| `setup.sql` | one-time database setup |
+| `favicon.png` | icon |
 
 ## Data and privacy
 
-The app does not need an account or backend. Listings are stored in the browser that you use to open the page. Export a JSON backup when you want to move the data to another browser or device.
+- **Your listings** never leave your browser (`localStorage`). Use Settings → Export backup to move them between devices.
+- **CPU/GPU scores** are shared: when someone adds a part that isn't in the list, it's saved to the shared database and every visitor gets it automatically. This only works once the database below is connected. Until then, parts are saved on the device only.
+- Nothing personal is collected. No accounts.
 
-The repository itself does not contain your saved listings unless you deliberately commit an exported JSON file. Do not commit a backup if it contains information you want to keep private.
+## One-time setup: shared database + admin
+
+The site is static (GitHub Pages), so shared data lives in a free [Supabase](https://supabase.com) project.
+
+1. Create a Supabase project.
+2. Open the **SQL Editor**, paste `setup.sql`, change `YOUR_PASSPHRASE` to your own passphrase, then run it.
+3. Go to **Project Settings → API** and copy the project URL and the publishable (anon) key into `config.js`.
+4. Commit `index.html`, `builtin-parts.js`, `config.js` and `favicon.png` to the repo root.
+
+The URL and anon key are meant to be public, so committing `config.js` is fine. The database is protected by row-level security. Visitors can read parts and add new ones, but can't edit or delete anything.
+
+## Admin (no GitHub push needed)
+
+Open the **Admin** link in the page footer and enter your passphrase to:
+
+- **Publish the default yardstick** – set the reference CPU/GPU in Settings, then publish it. Every visitor starts with it from then on.
+- **Edit or delete shared parts** – fix a wrong score or remove junk entries.
+
+Visitors who choose their own yardstick in Settings keep their own; "Reset to default" returns them to yours.
+
+## Updating the built-in parts list
+
+Edit `builtin-parts.js` (format: `[name, score]` pairs under `cpus` and `gpus`). Anything added through the app or the admin tab overrides the built-in entry with the same name.
 
 ## Run locally
 
-Open `index.html` in a browser.
-
-For a local web server, any static server will work; no package installation is required.
-
-## GitHub Pages
-
-This repository is ready to publish with GitHub Pages using the `main` branch and the repository root as the publishing source.
-
-Once Pages is enabled, the site is served from `index.html` at the published Pages URL.
+Open `index.html` in a browser. No build step, no dependencies. Without `config.js` values it runs fully offline.
 
 ## Notes
 
-This is a client-side calculator, so the scoring model is intentionally transparent in the page source. Benchmark values in the built-in reference lists are only as current as the data included in the file; add or edit custom references when needed.
+Benchmark values are PassMark CPU Mark / G3D Mark and are only as current as the data in the list. Add or correct entries whenever you need to.
