@@ -1,0 +1,46 @@
+name: Weekly PassMark sync
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # every Monday, 06:00 UTC (07:00 or 08:00 in Paris)
+  workflow_dispatch: # lets you run it by hand from the Actions tab
+    inputs:
+      force:
+        description: "Skip the safety checks (only if you checked the big change is real)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: passmark-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download PassMark lists and rebuild builtin-parts.js
+        env:
+          FORCE: ${{ inputs.force }}
+        run: node scripts/update-parts.mjs
+
+      - name: Save the result if anything changed
+        run: |
+          if git diff --quiet -- builtin-parts.js; then
+            echo "builtin-parts.js unchanged - nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add builtin-parts.js
+          git commit -m "Weekly PassMark sync"
+          git push
