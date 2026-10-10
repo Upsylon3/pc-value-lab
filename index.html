@@ -64,6 +64,7 @@ footer{color:var(--muted);font-size:.75rem;margin-top:26px;text-align:center}foo
  <div class="row"><button class="btn pri" id="addBtn" type="submit">Add to comparison</button><button class="btn gh" type="button" id="cancelBtn" hidden data-act="cancel">Cancel edit</button></div></form></div></section>
 
 <section id="t-settings" hidden>
+ <div class="card" id="acCard" hidden><h2>Account <span class="k" style="font-weight:500">(optional)</span></h2><div id="acBody"></div></div>
  <div class="card"><h2>Your yardstick</h2><p class="lead">The PC that counts as 100%. Every listing is scored as a % of it. Most people can leave this alone.</p>
   <div class="chip" style="margin-bottom:12px"><span id="refNow"></span><button class="btn gh" data-act="refReset">Reset to default</button></div>
   <div class="g"><div><label>Change reference CPU</label><div id="pkRefCpu"></div></div><div><label>Change reference GPU</label><div id="pkRefGpu"></div></div></div></div>
@@ -106,11 +107,15 @@ const MARKET={asOf:"2026-10-10",
  ref:{ramGB:64,ramType:"DDR5",ssdGB:2000}}; // what counts as 100% for RAM / storage (same idea as the CPU/GPU yardstick)
 const COST=(()=>{const b=MARKET.build,c={gpu:b.gpu,cpu:b.cpu,ram:b.ramGB*MARKET.ramPerGB[b.ramType],sto:b.ssdGB*MARKET.ssdPerGB},t=c.gpu+c.cpu+c.ram+c.sto;
  return{c,t,w:{gpu:c.gpu/t,cpu:c.cpu/t,ram:c.ram/t,sto:c.sto/t}}})();
-let items=jget("pcvaluelab_items",[]).map(i=>({...i,favorite:!!i.favorite})),localParts={cpu:jget("pcvaluelab_custom_cpus",[]),gpu:jget("pcvaluelab_custom_gpus",[])},
+/* Every listing has a stable id and an updatedAt time. Without them two devices cannot tell "same listing, edited" from "different listing". */
+const uid=()=>crypto.randomUUID?crypto.randomUUID():Math.random().toString(36).slice(2)+Date.now().toString(36),num=v=>typeof v=="number"&&isFinite(v),
+ norm=i=>({...i,ssd:+i.ssd||0,hdd:+i.hdd||0,ramType:i.ramType||"DDR4",favorite:!!i.favorite,id:i.id||uid(),updatedAt:num(i.updatedAt)?i.updatedAt:0}); // updatedAt 0 = "older than any real edit"
+let items=jget("pcvaluelab_items",[]).map(norm),tombs=jget("pvl_tombs",[]).filter(t=>t&&typeof t.id=="string"),localParts={cpu:jget("pcvaluelab_custom_cpus",[]),gpu:jget("pcvaluelab_custom_gpus",[])},
 remote=jget("pvl_remote",{parts:[],ref:null}),P=Object.assign({aes:0,cur:"EUR",ref:null,theme:null,seen:0,avail:true,worth:false,setup:150},jget("pvl_prefs",{})),
-parts={cpu:[],gpu:[]},editIdx=-1,filt="all",admin=sessionStorage.getItem("pvl_admin")||"",tab="compare";
+parts={cpu:[],gpu:[]},editIdx=-1,editId="",filt="all",admin=sessionStorage.getItem("pvl_admin")||"",tab="compare";
 if(LS.getItem("pcvaluelab_currency"))P.cur=LS.getItem("pcvaluelab_currency");if(LS.getItem("pcvaluelab_theme")&&!P.theme)P.theme=LS.getItem("pcvaluelab_theme");
-const saveP=()=>jset("pvl_prefs",P),saveI=()=>jset("pcvaluelab_items",items);
+const saveP=()=>jset("pvl_prefs",P),saveI=()=>{jset("pcvaluelab_items",items);scheduleSync()}; // every local change is also pushed to the account (debounced), when signed in
+const tomb=it=>{tombs.push({id:it.id,deleted:true,updatedAt:Date.now()});jset("pvl_tombs",tombs)}; // a deletion has to travel too, so it leaves a small marker
 const esc=v=>String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
 const money=v=>(P.cur=="EUR"?"€":"$")+Number(v).toLocaleString(undefined,{maximumFractionDigits:0}),fmt=n=>Number(n).toLocaleString();
 function toast(m){const t=$("toast");t.textContent=m;t.classList.add("on");clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove("on"),2600)}
@@ -127,6 +132,88 @@ async function adminRpc(name,body){let r;try{r=await rpc(name,body)}catch(e){ret
  if(r.status==401||r.status==403)return{ok:false,why:"Supabase refused the key (HTTP "+r.status+"). Check config.js."};
  if(/denied/i.test(msg))return{ok:false,why:"Wrong passphrase"};
  return{ok:false,why:"Database error "+r.status+(msg?": "+msg:"")}}
+
+/* ---------- accounts + listing sync ----------
+   WHY this shape: the site has no server of its own, so the account is Supabase Auth (email + password, no email is ever sent) and each
+   account owns ONE row in user_listings that holds all its listings as a JSON array. Row-level security (setup.sql) lets only the owner read it.
+   Two devices can be edited while apart, so each listing has an id + updatedAt, a deleted listing leaves a tombstone, and merging keeps the
+   newest version of every listing. A merge never drops a listing that only one side has. Export / Import backup keeps working with or without an account. */
+const AUTH=C.supabaseUrl+"/auth/v1";
+let sess=jget("pvl_session",null),sy={busy:false,queued:false,at:0,err:"",timer:0};
+const sane=e=>e&&typeof e=="object"&&typeof e.id=="string"&&e.id&&(e.deleted===true||(num(e.price)&&e.price>0&&num(e.cpuScore)&&num(e.gpuScore)&&num(e.ram)&&typeof e.cpuName=="string"&&typeof e.gpuName=="string")),
+ fp=i=>[i.name,i.cpuName,i.gpuName,i.ram,i.ramType,i.ssd,i.hdd,i.price].join("|").toLowerCase(); // "same listing" test for lists made before ids existed
+/* Merge two lists: localLive/localTombs (this device) and remote (live listings and tombstones from the account or a backup file).
+   Returns the merged live listings, the tombstones worth keeping, and whether the remote copy is out of date. */
+function mergeAll(localLive,localTombs,remote){
+ const rIds=new Set(remote.map(e=>e.id)),lIds=new Set(localLive.map(i=>i.id)),rfp=new Map();
+ // The same listing created separately on two devices (e.g. both imported the same old backup) gets two ids. Adopt the other side's id so it is not doubled.
+ remote.filter(e=>!e.deleted&&!lIds.has(e.id)).forEach(e=>rfp.set(fp(e),e.id));
+ const L=localLive.map(i=>{if(!rIds.has(i.id)&&rfp.has(fp(i))){const id=rfp.get(fp(i));rfp.delete(fp(i));return{...i,id}}return i});
+ const best=new Map(),take=e=>{const c=best.get(e.id);if(!c||(e.updatedAt||0)>(c.updatedAt||0))best.set(e.id,e)};
+ remote.forEach(take);localTombs.forEach(take);L.forEach(take); // remote goes first so that on an exact tie every device settles on the same copy
+ const live=[],seen=new Set();
+ for(const i of L){const e=best.get(i.id);if(e&&!e.deleted&&!seen.has(e.id)){live.push(e);seen.add(e.id)}} // keep this device's order, new ones after
+ for(const e of best.values())if(!e.deleted&&!seen.has(e.id)){live.push(e);seen.add(e.id)}
+ const cutoff=Date.now()-180*864e5, // tombstones older than ~6 months are dropped so the list cannot grow forever
+  tb=[...best.values()].filter(e=>e.deleted&&(e.updatedAt||0)>cutoff).map(e=>({id:e.id,deleted:true,updatedAt:e.updatedAt||0})),
+  rm=new Map(remote.map(e=>[e.id,e])),entries=[...live,...tb],
+  stale=entries.some(e=>{const r=rm.get(e.id);return !r||(r.updatedAt||0)!==(e.updatedAt||0)||!!r.deleted!==!!e.deleted});
+ return{live,tombs:tb,entries,remoteStale:stale}}
+const authFetch=(path,body,tok)=>fetch(AUTH+path,{method:"POST",headers:{apikey:C.supabaseKey,"Content-Type":"application/json",...(tok?{Authorization:"Bearer "+tok}:{})},body:JSON.stringify(body)});
+function setSession(d){sess={access:d.access_token,refresh:d.refresh_token,exp:Date.now()+(d.expires_in||3600)*1000,email:(d.user&&d.user.email)||(sess&&sess.email)||"",uid:(d.user&&d.user.id)||(sess&&sess.uid)||""};jset("pvl_session",sess)}
+function dropSession(msg){sess=null;try{LS.removeItem("pvl_session")}catch(e){}sy.err=msg||"";renderAccount()}
+async function freshToken(){if(!sess)return null;if(sess.exp-Date.now()>60000)return sess.access;
+ const r=await authFetch("/token?grant_type=refresh_token",{refresh_token:sess.refresh});
+ if(!r.ok){if(r.status>=400&&r.status<500){dropSession("Your session ended. Sign in again.");return null}throw new Error("Auth error "+r.status)}
+ setSession(await r.json());return sess.access}
+async function userApi(p,o={}){const go=async()=>{const t=await freshToken();if(!t)throw new Error("signed-out");return api(p,{...o,headers:{...(o.headers||{}),Authorization:"Bearer "+t}})};
+ let r=await go();if(r.status==401&&sess){sess.exp=0;r=await go()} // token refused (revoked, clock off): refresh once and retry
+ return r}
+async function why(r){let m="";try{const d=await r.json();m=d.message||d.msg||d.error_description||d.hint||""}catch(e){}
+ if(r.status==404)return"The account table is missing in Supabase. Run setup.sql there.";
+ if(r.status==403||/permission denied/i.test(m))return"Supabase blocked access to the account table. Run setup.sql again, it grants it.";
+ return"Error "+r.status+(m?": "+m:"")}
+function scheduleSync(){if(!ON||!sess)return;clearTimeout(sy.timer);sy.timer=setTimeout(cloudSync,1500)}
+async function cloudSync(){if(!ON||!sess)return;if(sy.busy){sy.queued=true;return}
+ sy.busy=true;sy.err="";renderAccount();
+ try{
+  for(let n=0;n<4;n++){ // retried because another device may save between our read and our write
+   const r=await userApi("user_listings?select=items,rev&limit=1");if(!r.ok)throw new Error(await why(r));
+   const row=(await r.json())[0]||null,
+    remote=row&&Array.isArray(row.items)?row.items.filter(sane).map(e=>e.deleted?{id:e.id,deleted:true,updatedAt:num(e.updatedAt)?e.updatedAt:0}:norm(e)):[],
+    m=mergeAll(items,tombs,remote);
+   items=m.live;tombs=m.tombs;jset("pcvaluelab_items",items);jset("pvl_tombs",tombs);
+   if(editId)editIdx=items.findIndex(x=>x.id==editId); // the list may have been reshuffled under an open edit form
+   if(!m.remoteStale){sy.at=Date.now();break}
+   const body=JSON.stringify({items:m.entries,rev:(row?row.rev:0)+1,updated_at:new Date().toISOString()}),
+    h={Prefer:"return=representation"},
+    // rev=eq.<what we read> makes the save atomic: if someone else saved in between, it matches no row and we merge again
+    w=row?await userApi("user_listings?rev=eq."+row.rev,{method:"PATCH",headers:h,body}):await userApi("user_listings",{method:"POST",headers:h,body});
+   if(w.ok){const out=await w.json();if(Array.isArray(out)&&out.length){sy.at=Date.now();break}}
+   else if(w.status!=409)throw new Error(await why(w)); // 409 = the first row was created by another device a moment ago
+   if(n==3)throw new Error("Another device keeps saving at the same moment. Try again in a bit.")}
+ }catch(e){sy.err=e.message=="signed-out"?"":(e.name=="TypeError"?"Can't reach the database. It will retry when you're back online.":e.message)}
+ finally{sy.busy=false;build();renderAll();renderAccount();if(sy.queued){sy.queued=false;scheduleSync()}}}
+function authMsg(d,status){const c=d.error_code||d.code||"";
+ if(c=="invalid_credentials")return"Wrong email or password.";if(c=="user_already_exists")return"That email already has an account. Sign in instead.";
+ if(c=="email_not_confirmed")return"Confirm your email first (check your inbox).";if(c=="signup_disabled")return"Sign-ups are switched off on this Supabase project.";
+ if(/rate_limit/.test(c)||status==429)return"Too many attempts. Wait a bit and retry.";
+ return d.msg||d.error_description||d.message||"Error "+status}
+async function authSubmit(mode){const email=$("acEmail").value.trim(),password=$("acPass").value;
+ if(!email||!password)return toast("Enter your email and password");if(mode=="up"&&password.length<6)return toast("Use at least 6 characters");
+ let r;try{r=await authFetch(mode=="in"?"/token?grant_type=password":"/signup",{email,password})}catch(e){return toast("Can't reach the database.")}
+ let d={};try{d=await r.json()}catch(e){}
+ if(!r.ok)return toast(authMsg(d,r.status));
+ if(!d.access_token)return toast("Check your email to confirm the account, then sign in."); // sign-up while "Confirm email" is on: no session until the link is clicked
+ sy.err="";setSession(d);renderAccount();toast("Signed in ✓");cloudSync()}
+async function signOut(){const t=sess&&sess.access;try{if(t)await authFetch("/logout?scope=local",{},t)}catch(e){} // scope=local: end this device only, not every session
+ dropSession("");sy.at=0;renderAccount();
+ if(items.length&&confirm("Signed out. Remove your listings from this device too? They stay in your account.")){items=[];tombs=[];jset("pcvaluelab_items",items);jset("pvl_tombs",tombs);renderAll()}} // no tombstones here: this is "forget on this device", not "delete"
+function renderAccount(){const c=$("acCard");c.hidden=!ON;if(!ON)return;
+ if(sess){const st=sy.busy?"Syncing…":sy.err?`<span style="color:var(--bad)">${esc(sy.err)}</span>`:sy.at?"Synced "+new Date(sy.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"Not synced yet";
+  $("acBody").innerHTML=`<p class="lead">Signed in as <b>${esc(sess.email)}</b>. Your listings sync between your devices.</p><div class="row"><button class="btn pri" data-act="syncNow">Sync now</button><button class="btn" data-act="signout">Sign out</button><span class="sp">${st}</span></div>`}
+ else $("acBody").innerHTML=`<p class="lead">Sign in to keep your listings in sync between your devices. Without an account everything stays on this device, and Export / Import backup still work.</p><form id="acForm"><div class="g"><div><label>Email</label><input id="acEmail" type="email" autocomplete="username"></div><div><label>Password</label><input id="acPass" type="password" autocomplete="current-password" placeholder="6+ characters"></div></div><div class="row" style="margin-top:12px"><button class="btn pri" type="submit">Sign in</button><button class="btn" type="button" data-act="signup">Create account</button></div></form><div class="err">${esc(sy.err)}</div><p class="hint">Listings already on this device are added to your account the first time you sign in.</p>`}
+
 async function sync(){if(!ON)return;try{const s=await api("app_settings?key=eq.reference&select=value").then(r=>r.json());
  if(Array.isArray(s)&&s[0])remote.ref=s[0].value;jset("pvl_remote",remote);build();renderAll()}catch(e){}}
 function build(){const m={cpu:new Map(),gpu:new Map()};
@@ -211,22 +298,23 @@ unk($("f_ramU"),$("f_ram"),16,$("f_ramType"));unk($("f_ssdU"),$("f_ssd"),1000);
 function setupHint(){const on=$("f_setup").checked,p=+$("f_price").value,a=+$("f_setupAmt").value;$("setupHint").textContent=on&&p>0&&a>=0?(a<p?`Ranked as a ${money(p-a)} PC.`:"The setup can't be worth the whole price."):""}
 $("f_setup").onchange=()=>{const on=$("f_setup").checked;$("setupBox").hidden=!on;if(on&&$("f_setupAmt").value==="")$("f_setupAmt").value=P.setup;setupHint()};
 $("f_price").addEventListener("input",setupHint);$("f_setupAmt").addEventListener("input",setupHint);
-function resetForm(){$("form").reset();$("setupBox").hidden=true;$("setupHint").textContent="";pk.cpu.set(null);pk.gpu.set(null);["f_ram","f_ssd","f_ramType"].forEach(i=>$(i).disabled=false);editIdx=-1;$("fTitle").textContent="Add a PC";$("addBtn").textContent="Add to comparison";$("cancelBtn").hidden=true;$("formErr").textContent=""}
+function resetForm(){$("form").reset();$("setupBox").hidden=true;$("setupHint").textContent="";pk.cpu.set(null);pk.gpu.set(null);["f_ram","f_ssd","f_ramType"].forEach(i=>$(i).disabled=false);editIdx=-1;editId="";$("fTitle").textContent="Add a PC";$("addBtn").textContent="Add to comparison";$("cancelBtn").hidden=true;$("formErr").textContent=""}
 $("form").onsubmit=e=>{e.preventDefault();const ramU=$("f_ramU").checked,ssdU=$("f_ssdU").checked,price=+$("f_price").value,ram=ramU?16:+$("f_ram").value,ssd=ssdU?1000:+$("f_ssd").value||0,setupOn=$("f_setup").checked,setupAmt=+$("f_setupAmt").value,er=[];
  if(!pk.cpu.val)er.push("choose a CPU");if(!pk.gpu.val)er.push("choose a GPU");if(!(price>0))er.push("enter the price");if(!(ram>0))er.push("enter the RAM, or tick “I don't know”");if(setupOn&&!(setupAmt>=0&&setupAmt<price))er.push("enter a setup value below the price");
  if(er.length){$("formErr").textContent="Please "+er.join(", ")+".";return}
- const rec={name:$("f_name").value.trim(),cpuName:pk.cpu.val[0],cpuScore:pk.cpu.val[1],gpuName:pk.gpu.val[0],gpuScore:pk.gpu.val[1],ram,ramType:ramU?"DDR4":$("f_ramType").value,ssd,hdd:+$("f_hdd").value||0,price,aesthetic:$("f_look").value,ramUnknown:ramU,ssdUnknown:ssdU,setup:setupOn,setupAmt:setupOn?setupAmt:null,available:$("f_avail").checked,favorite:editIdx>=0?!!items[editIdx].favorite:false};
+ const rec={name:$("f_name").value.trim(),cpuName:pk.cpu.val[0],cpuScore:pk.cpu.val[1],gpuName:pk.gpu.val[0],gpuScore:pk.gpu.val[1],ram,ramType:ramU?"DDR4":$("f_ramType").value,ssd,hdd:+$("f_hdd").value||0,price,aesthetic:$("f_look").value,ramUnknown:ramU,ssdUnknown:ssdU,setup:setupOn,setupAmt:setupOn?setupAmt:null,available:$("f_avail").checked,id:editIdx>=0?items[editIdx].id:uid(),updatedAt:Date.now(),favorite:editIdx>=0?!!items[editIdx].favorite:false};
  if(editIdx>=0)items[editIdx]=rec;else items.push(rec);saveI();resetForm();renderAll();go("compare");toast("Added — see how it ranks")};
-function edit(i){const it=items[i];go("add");resetForm();editIdx=i;$("fTitle").textContent="Edit PC";$("addBtn").textContent="Save changes";$("cancelBtn").hidden=false;
+function edit(i){const it=items[i];go("add");resetForm();editIdx=i;editId=it.id;$("fTitle").textContent="Edit PC";$("addBtn").textContent="Save changes";$("cancelBtn").hidden=false;
  $("f_name").value=it.name||"";pk.cpu.set([it.cpuName,it.cpuScore]);pk.gpu.set([it.gpuName,it.gpuScore]);$("f_ramU").checked=!!it.ramUnknown;$("f_ssdU").checked=!!it.ssdUnknown;
  $("f_ram").value=it.ram;$("f_ramType").value=it.ramType;$("f_ssd").value=it.ssd;$("f_ram").disabled=$("f_ramType").disabled=!!it.ramUnknown;$("f_ssd").disabled=!!it.ssdUnknown;$("f_hdd").value=it.hdd||"";$("f_price").value=it.price;$("f_look").value=it.aesthetic||"neutral";$("f_setup").checked=!!it.setup;$("setupBox").hidden=!it.setup;$("f_setupAmt").value=it.setup?(Number.isFinite(it.setupAmt)?it.setupAmt:P.setup):"";$("f_avail").checked=isAvail(it);setupHint()}
 /* ---------- actions ---------- */
 const A={help:()=>$("help").showModal(),theme:()=>{P.theme=document.documentElement.dataset.theme=="dark"?"light":"dark";document.documentElement.dataset.theme=P.theme;saveP()},
  goadd:()=>go("add"),cancel:()=>{resetForm()},refReset:()=>{P.ref=null;saveP();renderAll()},
- sample:()=>{items=[["Ryzen 5 5600 + RTX 3060","AMD Ryzen 5 5600",21000,"NVIDIA GeForce RTX 3060",17000,16,"DDR4",500,450],["Core i7-12700 + RX 6700 XT","Intel Core i7-12700",30000,"Radeon RX 6700 XT",19840,32,"DDR4",1000,600],["Ryzen 7 7800X3D + RX 7800 XT","AMD Ryzen 7 7800X3D",34280,"Radeon RX 7800 XT",24226,32,"DDR5",1000,1100]].map(a=>({name:a[0],cpuName:a[1],cpuScore:a[2],gpuName:a[3],gpuScore:a[4],ram:a[5],ramType:a[6],ssd:a[7],hdd:0,price:a[8],aesthetic:"neutral",favorite:false}));saveI();renderAll()},
- fav:i=>{items[i].favorite=!items[i].favorite;saveI();renderAll()},avail:i=>{items[i].available=items[i].available===false;saveI();renderAll()},edit,det:i=>{$("det"+i).hidden=!$("det"+i).hidden},
- del:i=>{if(confirm("Delete this PC?")){items.splice(i,1);saveI();renderAll()}},clear:()=>{if(items.length&&confirm("Delete all "+items.length+" listings?")){items=[];saveI();renderAll()}},
- export:()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify({version:3,exportedAt:new Date().toISOString(),items,customCPUs:localParts.cpu,customGPUs:localParts.gpu,settings:{setupDefault:P.setup,aestheticWeight:P.aes,refCpuScore:refNow().cpu,refGpuScore:refNow().gpu}},null,2)],{type:"application/json"}));a.download="pc-value-lab-backup.json";a.click()},
+ sample:()=>{items=[["Ryzen 5 5600 + RTX 3060","AMD Ryzen 5 5600",21000,"NVIDIA GeForce RTX 3060",17000,16,"DDR4",500,450],["Core i7-12700 + RX 6700 XT","Intel Core i7-12700",30000,"Radeon RX 6700 XT",19840,32,"DDR4",1000,600],["Ryzen 7 7800X3D + RX 7800 XT","AMD Ryzen 7 7800X3D",34280,"Radeon RX 7800 XT",24226,32,"DDR5",1000,1100]].map(a=>({name:a[0],cpuName:a[1],cpuScore:a[2],gpuName:a[3],gpuScore:a[4],ram:a[5],ramType:a[6],ssd:a[7],hdd:0,price:a[8],aesthetic:"neutral",favorite:false,id:uid(),updatedAt:Date.now()}));saveI();renderAll()},
+ fav:i=>{items[i].favorite=!items[i].favorite;items[i].updatedAt=Date.now();saveI();renderAll()},avail:i=>{items[i].available=items[i].available===false;items[i].updatedAt=Date.now();saveI();renderAll()},
+ signup:()=>authSubmit("up"),syncNow:()=>cloudSync(),signout:signOut,edit,det:i=>{$("det"+i).hidden=!$("det"+i).hidden},
+ del:i=>{if(confirm("Delete this PC?")){tomb(items[i]);items.splice(i,1);saveI();renderAll()}},clear:()=>{if(items.length&&confirm("Delete all "+items.length+" listings?")){items.forEach(tomb);items=[];saveI();renderAll()}},
+ export:()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify({version:4,exportedAt:new Date().toISOString(),items,customCPUs:localParts.cpu,customGPUs:localParts.gpu,settings:{setupDefault:P.setup,aestheticWeight:P.aes,refCpuScore:refNow().cpu,refGpuScore:refNow().gpu}},null,2)],{type:"application/json"}));a.download="pc-value-lab-backup.json";a.click()},
  import:()=>$("impFile").click(),
  unlock:async()=>{const p=$("adPass").value;if(!ON)return toast("Connect Supabase first (config.js)");if(!p)return toast("Enter the passphrase");
   const x=await adminRpc("admin_check",{p});if(!x.ok)return toast(x.why);
@@ -244,8 +332,21 @@ document.addEventListener("click",e=>{const t=e.target.closest("[data-tab]");if(
  const c=e.target.closest("#cur button");if(c){P.cur=c.dataset.c;saveP();renderAll()}});
 document.addEventListener("input",e=>{const t=e.target;if(t.dataset.k){P[t.dataset.k]=+t.value;saveP();renderAll()}if(t.id=="setupDef"){P.setup=Math.max(0,+t.value||0);saveP()}});
 $("sortMode").onchange=renderList;$("adPass").addEventListener("keydown",e=>{if(e.key=="Enter")A.unlock()});$("optAvail").onchange=e=>{P.avail=e.target.checked;saveP();renderList()};$("optWorth").onchange=e=>{P.worth=e.target.checked;saveP();renderList()};
-$("impFile").onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!Array.isArray(d.items))throw 0;items=d.items.map(i=>({...i,favorite:!!i.favorite}));saveI();
- const s=d.settings||{};if(Number.isFinite(s.setupDefault))P.setup=s.setupDefault;saveP();renderAll();toast("Backup imported ✓")}catch(x){toast("That file isn't a Scam or Steal backup")}};r.readAsText(f)};
+/* Import ADDS to what you have and never deletes. Replacing would be dangerous now: with an account, a replaced list would delete listings
+   everywhere, and a backup sent by a friend would wipe yours. To start clean, use "Delete all listings" first. */
+$("impFile").onchange=e=>{const f=e.target.files[0];e.target.value="";if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!Array.isArray(d.items))throw 0;
+ let inc=d.items.map(norm).filter(sane);const bad=d.items.length-inc.length;if(!inc.length)throw 0;
+ const lfp=new Set(items.map(fp)),have=new Set(items.map(i=>i.id));inc=inc.filter(x=>have.has(x.id)||!lfp.has(fp(x))); // already have it (same listing, older backup): skip
+ if(items.length&&!confirm("Add "+inc.length+" listing"+(inc.length==1?"":"s")+" from this backup to your list? Nothing you already have is deleted."))return;
+ const before=items.length,ids=new Set(inc.map(x=>x.id));tombs=tombs.filter(t=>!ids.has(t.id)); // a backup restores a listing you deleted earlier
+ const m=mergeAll(items,tombs,inc);items=m.live;tombs=m.tombs;jset("pvl_tombs",tombs);saveI();
+ const s=d.settings||{};if(Number.isFinite(s.setupDefault))P.setup=s.setupDefault;saveP();build();renderAll();
+ toast("Backup imported ✓ "+(items.length-before)+" added"+(bad?", "+bad+" skipped":""))}catch(x){toast("That file isn't a Scam or Steal backup")}};r.readAsText(f)};
 if(P.theme)document.documentElement.dataset.theme=P.theme;
 build();renderAll();go(["compare","add","settings","admin"].includes(location.hash.slice(1))?location.hash.slice(1):"compare");sync();
+jset("pcvaluelab_items",items); // saves the ids given to listings from before accounts existed, so they stay the same on the next load
+renderAccount();if(sess)cloudSync();
+document.addEventListener("submit",e=>{if(e.target.id=="acForm"){e.preventDefault();authSubmit("in")}});
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&sess&&Date.now()-sy.at>6e4)cloudSync()}); // pick up edits made on another device
+addEventListener("online",scheduleSync);
 </script></body></html>
