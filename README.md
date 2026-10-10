@@ -1,4 +1,4 @@
-# PC Value Lab
+# Scam or Steal
 
 Find the best-value used PC. Add listings, and the app ranks them by real performance per euro.
 
@@ -8,13 +8,21 @@ Find the best-value used PC. Add listings, and the app ranks them by real perfor
 
 1. **Add a PC** – search its CPU and GPU, enter the price. That's all that's required.
 2. **Unknown RAM or SSD?** Tick "I don't know" and the app assumes 16 GB DDR4 / 1000 GB SSD. Assumed values are marked with `~` in the results.
-3. **Compare** – the best deal rises to the top. Sort by value, power, price and more, or star your favourites.
+3. **Setup included?** Tick it on a listing and the app takes the setup's value (default €150, change it in Settings or per listing) off the price, so the PC is ranked at its real price.
+4. **Compare** – the best deal rises to the top. Sort by value, power, price and more, star your favourites, and mark listings that went offline as unavailable.
 
 ## What the scores mean
 
-- **Performance** – CPU, GPU, RAM and storage compared with a yardstick PC (100%), then weighted. Pick a profile in Settings (Balanced / Gaming / Work) or fine-tune under "Advanced".
-- **Value** – performance divided by price, shown from 0 to 100 (100 = best deal in your list).
-- DDR4 is slightly penalised against DDR5 (adjustable). Looks can optionally influence the score (off by default).
+- **Performance** – CPU, GPU, RAM and storage compared with a yardstick PC (100%), then weighted by what a typical 2026 build spends on each part (today roughly GPU 41%, CPU 16%, RAM 35%, storage 8%). RAM and storage are valued at market price per GB, so DDR5 counts for more than DDR4 by what it really costs.
+- **Value** – performance divided by price (minus an included setup), shown from 0 to 100 (100 = best deal among the available listings).
+- Looks can optionally influence the score (off by default).
+
+## Ranking filters
+
+[#ranking-filters](#ranking-filters)
+
+- **Available only** – hides listings marked unavailable (paused, sold). Combines with All / Favourites / DDR5 only.
+- **Logically worth only** – hides any listing that costs more than a more powerful one. Listings at the same price all stay, so sorted by power the prices only go down the list.
 
 ## Files
 
@@ -51,6 +59,19 @@ Open the **Admin** link in the page footer and enter your passphrase to:
 - **Edit or delete shared parts** – fix a wrong score or remove junk entries.
 
 Visitors who choose their own yardstick in Settings keep their own; "Reset to default" returns them to yours.
+
+## Roadmap
+
+[#roadmap](#roadmap)
+
+- **Accounts** – sign in so your listings follow you between devices, instead of exporting and importing a backup file. Planned on the existing Supabase project (login by email link, each person sees only their own listings). The "no accounts" line under Data and privacy will change with it.
+- **Import from ads** – paste a list of ad links (or the ad text) and get price, link and any CPU / GPU / RAM / storage found in the title or description filled in, leaving blanks where it is unsure. A pass over Leboncoin favourites is not possible from the site itself, since favourites sit behind your login.
+
+## Updating the market model
+
+[#updating-the-market-model](#updating-the-market-model)
+
+RAM, SSD, GPU and CPU prices sit in the `MARKET` block at the top of the script in `index.html` (with the sources in the comment above it). Change the numbers and the date; the weights and the DDR3 / DDR4 / DDR5 values follow. Only the ratios matter, so US dollars are fine even if you use euros in the app.
 
 ## Updating the built-in parts list
 
