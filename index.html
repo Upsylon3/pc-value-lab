@@ -89,7 +89,10 @@ footer{color:var(--muted);font-size:.75rem;margin-top:26px;text-align:center}foo
 <div class="toast" id="toast"></div>
 <script src="builtin-parts.js"></script><script src="config.js"></script>
 <script>
-const $=id=>document.getElementById(id),C=window.PVL_CONFIG||{},ON=!!(C.supabaseUrl&&C.supabaseKey),LS=localStorage;
+const $=id=>document.getElementById(id),C=window.PVL_CONFIG||{},ON=!!(C.supabaseUrl&&C.supabaseKey),LS=localStorage,
+ /* The URL is cleaned before use. A trailing slash ("https://x.supabase.co/") makes every request go to "https://x.supabase.co//auth/v1/...",
+    which Supabase answers with "Invalid path specified in request URL"; pasting the REST address by mistake (".../rest/v1") does the same. */
+ BASE=String(C.supabaseUrl||"").trim().replace(/\/+$/,"").replace(/\/(rest|auth)\/v1$/,"").replace(/\/+$/,""),KEY=String(C.supabaseKey||"").trim();
 const jget=(k,d)=>{try{return JSON.parse(LS.getItem(k))??d}catch(e){return d}},jset=(k,v)=>{try{LS.setItem(k,JSON.stringify(v))}catch(e){}};
 const DEF={cpuName:"AMD Ryzen 9 9950X3D",cpu:70098,gpuName:"GeForce RTX 5090",gpu:38864},LOOK={pretty:1,neutral:0,ugly:-1};
 /* ---------- market model ----------
@@ -120,7 +123,7 @@ const esc=v=>String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&
 const money=v=>(P.cur=="EUR"?"€":"$")+Number(v).toLocaleString(undefined,{maximumFractionDigits:0}),fmt=n=>Number(n).toLocaleString();
 function toast(m){const t=$("toast");t.textContent=m;t.classList.add("on");clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove("on"),2600)}
 /* ---------- shared backend ---------- */
-const api=(p,o={})=>fetch(C.supabaseUrl+"/rest/v1/"+p,{...o,headers:{apikey:C.supabaseKey,"Content-Type":"application/json",...(o.headers||{})}});
+const api=(p,o={})=>fetch(BASE+"/rest/v1/"+p,{...o,headers:{apikey:KEY,"Content-Type":"application/json",...(o.headers||{})}});
 const rpc=(n,b)=>api("rpc/"+n,{method:"POST",body:JSON.stringify(b)});
 /* Admin calls report WHY they failed. Before, a wrong passphrase, a missing SQL function and a dead network all looked alike
    ("Wrong passphrase", or nothing at all because a network error was never caught), which made a backend problem look like a login bug. */
@@ -138,7 +141,7 @@ async function adminRpc(name,body){let r;try{r=await rpc(name,body)}catch(e){ret
    account owns ONE row in user_listings that holds all its listings as a JSON array. Row-level security (setup.sql) lets only the owner read it.
    Two devices can be edited while apart, so each listing has an id + updatedAt, a deleted listing leaves a tombstone, and merging keeps the
    newest version of every listing. A merge never drops a listing that only one side has. Export / Import backup keeps working with or without an account. */
-const AUTH=C.supabaseUrl+"/auth/v1";
+const AUTH=BASE+"/auth/v1";
 let sess=jget("pvl_session",null),sy={busy:false,queued:false,at:0,err:"",timer:0};
 const sane=e=>e&&typeof e=="object"&&typeof e.id=="string"&&e.id&&(e.deleted===true||(num(e.price)&&e.price>0&&num(e.cpuScore)&&num(e.gpuScore)&&num(e.ram)&&typeof e.cpuName=="string"&&typeof e.gpuName=="string")),
  fp=i=>[i.name,i.cpuName,i.gpuName,i.ram,i.ramType,i.ssd,i.hdd,i.price].join("|").toLowerCase(); // "same listing" test for lists made before ids existed
@@ -159,7 +162,7 @@ function mergeAll(localLive,localTombs,remote){
   rm=new Map(remote.map(e=>[e.id,e])),entries=[...live,...tb],
   stale=entries.some(e=>{const r=rm.get(e.id);return !r||(r.updatedAt||0)!==(e.updatedAt||0)||!!r.deleted!==!!e.deleted});
  return{live,tombs:tb,entries,remoteStale:stale}}
-const authFetch=(path,body,tok)=>fetch(AUTH+path,{method:"POST",headers:{apikey:C.supabaseKey,"Content-Type":"application/json",...(tok?{Authorization:"Bearer "+tok}:{})},body:JSON.stringify(body)});
+const authFetch=(path,body,tok)=>fetch(AUTH+path,{method:"POST",headers:{apikey:KEY,"Content-Type":"application/json",...(tok?{Authorization:"Bearer "+tok}:{})},body:JSON.stringify(body)});
 function setSession(d){sess={access:d.access_token,refresh:d.refresh_token,exp:Date.now()+(d.expires_in||3600)*1000,email:(d.user&&d.user.email)||(sess&&sess.email)||"",uid:(d.user&&d.user.id)||(sess&&sess.uid)||""};jset("pvl_session",sess)}
 function dropSession(msg){sess=null;try{LS.removeItem("pvl_session")}catch(e){}sy.err=msg||"";renderAccount()}
 async function freshToken(){if(!sess)return null;if(sess.exp-Date.now()>60000)return sess.access;
@@ -198,6 +201,7 @@ function authMsg(d,status){const c=d.error_code||d.code||"";
  if(c=="invalid_credentials")return"Wrong email or password.";if(c=="user_already_exists")return"That email already has an account. Sign in instead.";
  if(c=="email_not_confirmed")return"Confirm your email first (check your inbox).";if(c=="signup_disabled")return"Sign-ups are switched off on this Supabase project.";
  if(/rate_limit/.test(c)||status==429)return"Too many attempts. Wait a bit and retry.";
+ if(/invalid path/i.test(d.message||d.msg||""))return"Supabase does not recognise the address. Check supabaseUrl in config.js: it must look like https://xxxx.supabase.co with nothing after it.";
  return d.msg||d.error_description||d.message||"Error "+status}
 async function authSubmit(mode){const email=$("acEmail").value.trim(),password=$("acPass").value;
  if(!email||!password)return toast("Enter your email and password");if(mode=="up"&&password.length<6)return toast("Use at least 6 characters");
